@@ -1,266 +1,464 @@
 name: Build APK
 run-name: build ${{ inputs.build_id }}
+
 on:
   workflow_dispatch:
     inputs:
       build_id:
+        description: Build ID
         required: true
+        type: string
       config:
+        description: Base64 encoded build configuration
         required: true
+        type: string
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.13
+
       - name: Generate Android project
         env:
           CFG: ${{ inputs.config }}
           ID: ${{ inputs.build_id }}
           KSPASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        shell: bash
         run: |
           set -e
-          j(){ echo "$CFG" | base64 -d | jq -r "$1"; }
-          NAME=$(j .name); PKG=$(j .pkg); VER=$(j .ver); CODE=$(j .code); THEME=$(j .theme)
-          case "$(j .orient)" in portrait) OR=portrait;; landscape) OR=landscape;; *) OR=unspecified;; esac
-          UP=""
-          perm(){ UP="$UP<uses-permission android:name=\"android.permission.$1\"/>"; }
-          [ "$(j .cam)" = true ] && perm CAMERA || true
-          [ "$(j .loc)" = true ] && perm ACCESS_FINE_LOCATION || true
-          [ "$(j .notif)" = true ] && perm POST_NOTIFICATIONS || true
-          R=app/src/main/res
-          mkdir -p app/src/main/java/com/w2a/app app/src/main/assets $R/drawable $R/values
+
+          j() {
+            echo "$CFG" | base64 -d | jq -r "$1"
+          }
+
+          NAME=$(j '.name')
+          PKG=$(j '.pkg')
+          VER=$(j '.ver')
+          CODE=$(j '.code')
+          URL=$(j '.url')
+          THEME=$(j '.theme')
+          STATUS=$(j '.status')
+          NAV=$(j '.nav')
+          UA=$(j '.ua')
+          OFFLINE=$(j '.offline')
+
+          JS=$(j '.js')
+          PTR=$(j '.ptr')
+          FILES=$(j '.files')
+          CAM=$(j '.cam')
+          LOC=$(j '.loc')
+          NOTIF=$(j '.notif')
+          DEBUG=$(j '.debug')
+
+          case "$(j '.orient')" in
+            portrait) OR="portrait" ;;
+            landscape) OR="landscape" ;;
+            *) OR="unspecified" ;;
+          esac
+
+          case "$(j '.cache')" in
+            network) CM="WebSettings.LOAD_NO_CACHE" ;;
+            cache) CM="WebSettings.LOAD_CACHE_ELSE_NETWORK" ;;
+            *) CM="WebSettings.LOAD_DEFAULT" ;;
+          esac
+
+          [ "$(j '.ext')" = "app" ] && EXTAPP=true || EXTAPP=false
+          [ "$(j '.back')" = "exit" ] && BACKEXIT=true || BACKEXIT=false
+          [ "$(j '.full')" = "true" ] && FULL="getWindow().getDecorView().setSystemUiVisibility(5894);" || FULL=""
+
+          [ -z "$OFFLINE" ] && OFFLINE="You are offline"
+
+          R="app/src/main/res"
+          mkdir -p \
+            app/src/main/java/com/w2a/app \
+            app/src/main/assets \
+            "$R/drawable" \
+            "$R/values" \
+            "$R/mipmap-xxhdpi"
+
           echo "$CFG" | base64 -d > app/src/main/assets/config.json
+
           ICON=""
           if [ -f "icons/$ID.png" ]; then
-            mkdir -p $R/mipmap-xxhdpi
-            cp "icons/$ID.png" $R/mipmap-xxhdpi/ic_launcher.png
+            cp "icons/$ID.png" "$R/mipmap-xxhdpi/ic_launcher.png"
             ICON='android:icon="@mipmap/ic_launcher"'
           fi
-          SIGN=""; REL=""
-          if [ "$(j .release)" = true ]; then
-            if [ -z "$KSPASS" ] || [ ! -f keystore.enc ]; then echo "::error::Signing key missing. Add KEYSTORE_PASSWORD secret and run 'Create signing key' first."; exit 1; fi
-            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:KSPASS -in keystore.enc -out release.jks
-            SIGN="signingConfigs{release{storeFile file('../release.jks');storePassword System.getenv('KSPASS');keyAlias 'upload';keyPassword System.getenv('KSPASS')}}"
+
+          PERMS=""
+          if [ "$CAM" = "true" ]; then
+            PERMS="$PERMS<uses-permission android:name=\"android.permission.CAMERA\"/>"
+          fi
+
+          if [ "$LOC" = "true" ]; then
+            PERMS="$PERMS<uses-permission android:name=\"android.permission.ACCESS_FINE_LOCATION\"/>"
+          fi
+
+          if [ "$NOTIF" = "true" ]; then
+            PERMS="$PERMS<uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>"
+          fi
+
+          SIGN=""
+          REL=""
+
+          if [ "$(j '.release')" = "true" ]; then
+            if [ -z "$KSPASS" ]; then
+              echo "::error::KEYSTORE_PASSWORD secret is missing."
+              exit 1
+            fi
+
+            if [ ! -f keystore.enc ]; then
+              echo "::error::keystore.enc is missing from the repository."
+              exit 1
+            fi
+
+            openssl enc \
+              -d \
+              -aes-256-cbc \
+              -pbkdf2 \
+              -iter 200000 \
+              -pass env:KSPASS \
+              -in keystore.enc \
+              -out release.jks
+
+            SIGN='
+              signingConfigs {
+                release {
+                  storeFile file("../release.jks")
+                  storePassword System.getenv("KSPASS")
+                  keyAlias "upload"
+                  keyPassword System.getenv("KSPASS")
+                }
+              }
+            '
+
             REL="signingConfig signingConfigs.release"
           fi
-          vec(){ echo "<vector xmlns:android=\"http://schemas.android.com/apk/res/android\" android:width=\"24dp\" android:height=\"24dp\" android:viewportWidth=\"24\" android:viewportHeight=\"24\"><path android:pathData=\"$2\" android:strokeColor=\"#FF000000\" android:strokeWidth=\"2\" android:strokeLineCap=\"round\" android:strokeLineJoin=\"round\" android:fillColor=\"#00000000\"/></vector>" > $R/drawable/ic_$1.xml; }
-          vec home "M4,11l8,-7 8,7 M6,10v10h12v-10"
-          vec search "M11,4a7,7 0 1,0 0.01,0 M16,16l5,5"
-          vec list "M4,6h16 M4,12h16 M4,18h16"
-          vec person "M12,4a4,4 0 1,0 0.01,0 M4,20c0,-4 4,-6 8,-6s8,2 8,6"
-          vec cart "M3,4h3l2,11h10l2,-8H7 M9,20a1,1 0 1,0 0.01,0 M17,20a1,1 0 1,0 0.01,0"
-          vec info "M12,3a9,9 0 1,0 0.01,0 M12,11v6 M12,7.5v0.5"
-          vec star "M12,3l2.6,5.6 6,0.7 -4.4,4.1 1.2,6 -5.4,-3 -5.4,3 1.2,-6 -4.4,-4.1 6,-0.7z"
-          vec heart "M12,20l-8,-8a5,5 0 0,1 8,-6a5,5 0 0,1 8,6z"
-          vec mail "M3,6h18v12H3z M3,6l9,7 9,-7"
-          vec share "M18,5a2,2 0 1,0 0.01,0 M6,12a2,2 0 1,0 0.01,0 M18,19a2,2 0 1,0 0.01,0 M8,11l8,-5 M8,13l8,5"
-          vec settings "M4,7h10 M18,7h2 M4,17h2 M10,17h10 M16,4v6 M8,14v6"
-          vec bell "M6,16v-5a6,6 0 0,1 12,0v5l2,2H4z M10,21h4"
-          vec back "M15,5l-7,7 7,7"
-          printf "pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}\ndependencyResolutionManagement{repositories{google();mavenCentral()}}\ninclude ':app'\n" > settings.gradle
-          echo "plugins{id 'com.android.application' version '8.11.1' apply false}" > build.gradle
-          printf "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\n" > gradle.properties
-          cat > $R/values/themes.xml <<EOF
-          <resources><style name="AppTheme" parent="Theme.MaterialComponents.DayNight.NoActionBar"><item name="colorPrimary">$THEME</item><item name="colorSecondary">$THEME</item><item name="colorOnPrimary">#FFFFFF</item></style></resources>
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+            repositories {
+              google()
+              mavenCentral()
+              gradlePluginPortal()
+            }
+          }
+
+          dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories {
+              google()
+              mavenCentral()
+            }
+          }
+
+          rootProject.name = "Web2APK"
+          include ":app"
           EOF
-          cat > app/build.gradle <<EOF
-          plugins{id 'com.android.application'}
-          android{namespace 'com.w2a.app';compileSdk 36
-          defaultConfig{applicationId "$PKG";minSdk 24;targetSdk 36;versionCode $CODE;versionName "$VER"}
-          lint{checkReleaseBuilds false;abortOnError false}
-          $SIGN
-          buildTypes{release{
-          $REL
-          minifyEnabled false}}}
-          dependencies{implementation 'androidx.appcompat:appcompat:1.7.1';implementation 'com.google.android.material:material:1.12.0';implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'}
-          EOF
-          cat > app/src/main/AndroidManifest.xml <<EOF
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-          <uses-permission android:name="android.permission.INTERNET"/>$UP
-          <application android:label="$NAME" $ICON android:theme="@style/AppTheme" android:usesCleartextTraffic="false">
-          <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="$OR" android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize">
-          <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
-          </activity>
-          <activity android:name=".SettingsActivity" android:exported="false"/>
-          </application></manifest>
-          EOF
-          cat > app/src/main/java/com/w2a/app/MainActivity.java <<'EOF'
-          package com.w2a.app;
-          import android.Manifest;import android.content.Intent;import android.content.SharedPreferences;import android.graphics.Color;import android.graphics.drawable.Drawable;import android.net.Uri;import android.os.Bundle;
-          import android.view.*;import android.webkit.*;import android.widget.*;
-          import androidx.activity.OnBackPressedCallback;import androidx.appcompat.app.*;import androidx.appcompat.widget.Toolbar;
-          import androidx.core.app.ActivityCompat;import androidx.core.content.ContextCompat;import androidx.core.graphics.Insets;import androidx.core.view.*;
-          import androidx.drawerlayout.widget.DrawerLayout;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
-          import com.google.android.material.bottomnavigation.BottomNavigationView;import com.google.android.material.navigation.NavigationView;
-          import java.util.ArrayList;import org.json.*;
-          public class MainActivity extends AppCompatActivity{
-          JSONObject C=new JSONObject();String base="";WebView w;SwipeRefreshLayout sr;DrawerLayout dl;SharedPreferences sp;ValueCallback<Uri[]> fc;
-          boolean b(String k){return C.optBoolean(k);}
-          int dp(int v){return (int)(v*getResources().getDisplayMetrics().density);}
-          int ic(String n){int r=getResources().getIdentifier("ic_"+n,"drawable",getPackageName());return r!=0?r:getResources().getIdentifier("ic_star","drawable",getPackageName());}
-          String abs(String u){try{return new java.net.URL(new java.net.URL(base),u).toString();}catch(Exception e){return base;}}
-          void go(String u){w.loadUrl(abs(u));}
-          @Override protected void onCreate(Bundle s){
-          try{C=new JSONObject(new java.util.Scanner(getAssets().open("config.json"),"UTF-8").useDelimiter("\\A").next());}catch(Exception e){}
-          base=C.optString("url");sp=getSharedPreferences("w2a",0);
-          if(!sp.contains("dark"))sp.edit().putBoolean("dark","dark".equals(C.optString("mode"))).putBoolean("extapp","app".equals(C.optString("ext"))).apply();
-          AppCompatDelegate.setDefaultNightMode(sp.getBoolean("dark",false)?AppCompatDelegate.MODE_NIGHT_YES:AppCompatDelegate.MODE_NIGHT_NO);
-          super.onCreate(s);
-          WindowCompat.setDecorFitsSystemWindows(getWindow(),false);
-          int th=Color.parseColor(C.optString("theme","#4f46e5")),sc=Color.parseColor(C.optString("status","#4f46e5")),nc=Color.parseColor(C.optString("nav","#000000"));
-          sp.edit().putInt("th",th).apply();
-          LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
-          View top=new View(this),bot=new View(this);top.setBackgroundColor(sc);bot.setBackgroundColor(nc);
-          Toolbar tb=new Toolbar(this);tb.setBackgroundColor(th);tb.setTitle(C.optString("name"));tb.setTitleTextColor(Color.WHITE);
-          Drawable mi=ContextCompat.getDrawable(this,ic("list")).mutate();mi.setTint(Color.WHITE);tb.setNavigationIcon(mi);
-          dl=new DrawerLayout(this);tb.setNavigationOnClickListener(v->dl.openDrawer(GravityCompat.START));
-          w=new WebView(this);sr=new SwipeRefreshLayout(this);sr.addView(w);
-          root.addView(top,new LinearLayout.LayoutParams(-1,0));root.addView(tb,new LinearLayout.LayoutParams(-1,dp(56)));
-          root.addView(sr,new LinearLayout.LayoutParams(-1,0,1f));
-          final JSONArray tabs=C.optJSONArray("tabs");
-          if(tabs!=null&&tabs.length()>=2){BottomNavigationView bn=new BottomNavigationView(this);
-          for(int i=0;i<tabs.length();i++){JSONObject t=tabs.optJSONObject(i);bn.getMenu().add(0,i,i,t.optString("l")).setIcon(ic(t.optString("i")));}
-          bn.setOnItemSelectedListener(it->{go(tabs.optJSONObject(it.getItemId()).optString("u"));return true;});
-          root.addView(bn,new LinearLayout.LayoutParams(-1,-2));}
-          root.addView(bot,new LinearLayout.LayoutParams(-1,0));
-          NavigationView nv=new NavigationView(this);
-          LinearLayout h=new LinearLayout(this);h.setOrientation(LinearLayout.VERTICAL);h.setBackgroundColor(th);h.setPadding(dp(20),dp(48),dp(20),dp(20));
-          if(getApplicationInfo().icon!=0){ImageView iv=new ImageView(this);iv.setImageResource(getApplicationInfo().icon);h.addView(iv,new LinearLayout.LayoutParams(dp(56),dp(56)));}
-          TextView t1=new TextView(this);t1.setText(C.optString("name"));t1.setTextColor(Color.WHITE);t1.setTextSize(20);t1.setTypeface(null,1);t1.setPadding(0,dp(12),0,0);
-          TextView t2=new TextView(this);t2.setText(C.optString("tag"));t2.setTextColor(0xCCFFFFFF);
-          h.addView(t1);h.addView(t2);nv.addHeaderView(h);
-          Menu m=nv.getMenu();JSONArray mn=C.optJSONArray("menu");
-          if(mn!=null)for(int i=0;i<mn.length();i++){JSONObject t=mn.optJSONObject(i);m.add(1,100+i,i,t.optString("l")).setIcon(ic(t.optString("i")));}
-          if(b("setg"))m.add(2,1,1,"Settings").setIcon(ic("settings"));
-          if(b("share"))m.add(2,2,2,"Share app").setIcon(ic("share"));
-          if(b("rate"))m.add(2,3,3,"Rate us").setIcon(ic("star"));
-          if(b("fb")&&!C.optString("mail").isEmpty())m.add(2,4,4,"Send feedback").setIcon(ic("mail"));
-          m.add(2,5,5,"About").setIcon(ic("info"));
-          if(!C.optString("privacy").isEmpty())m.add(2,6,6,"Privacy policy").setIcon(ic("list"));
-          nv.setNavigationItemSelectedListener(it->{dl.closeDrawers();menu(it.getItemId());return false;});
-          dl.addView(root,new DrawerLayout.LayoutParams(-1,-1));
-          DrawerLayout.LayoutParams lp=new DrawerLayout.LayoutParams(dp(300),-1);lp.gravity=GravityCompat.START;dl.addView(nv,lp);
-          setContentView(dl);
-          ViewCompat.setOnApplyWindowInsetsListener(dl,(v,in)->{Insets bi=in.getInsets(WindowInsetsCompat.Type.systemBars());
-          top.getLayoutParams().height=bi.top;top.requestLayout();bot.getLayoutParams().height=bi.bottom;bot.requestLayout();return WindowInsetsCompat.CONSUMED;});
-          if(b("full")){WindowInsetsControllerCompat c=new WindowInsetsControllerCompat(getWindow(),dl);c.hide(WindowInsetsCompat.Type.systemBars());c.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);}
-          WebSettings t=w.getSettings();t.setJavaScriptEnabled(C.optBoolean("js",true));t.setDomStorageEnabled(true);t.setGeolocationEnabled(b("loc"));
-          String cm=C.optString("cache");t.setCacheMode("network".equals(cm)?WebSettings.LOAD_NO_CACHE:"cache".equals(cm)?WebSettings.LOAD_CACHE_ELSE_NETWORK:WebSettings.LOAD_DEFAULT);
-          if(!C.optString("ua").isEmpty())t.setUserAgentString(C.optString("ua"));
-          WebView.setWebContentsDebuggingEnabled(b("debug"));
-          sr.setOnRefreshListener(()->{if(w.getUrl()==null||w.getUrl().startsWith("data:"))w.loadUrl(base);else w.reload();});
-          w.setDownloadListener((u,a,c,mm,l)->{if(b("files")){try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(u)));}catch(Exception e){}}});
-          w.setWebViewClient(new WebViewClient(){
-          @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){Uri u=r.getUrl();String sch=u.getScheme();
-          if(!"http".equals(sch)&&!"https".equals(sch)){try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}
-          String hh=u.getHost(),bh=Uri.parse(base).getHost();
-          if(sp.getBoolean("extapp",false)||hh==null||bh==null||hh.equals(bh)||hh.endsWith("."+bh)||bh.endsWith("."+hh))return false;
-          startActivity(new Intent(Intent.ACTION_VIEW,u));return true;}
-          @Override public void onPageFinished(WebView v,String u){sr.setRefreshing(false);}
-          @Override public void onReceivedError(WebView v,WebResourceRequest r,WebResourceError e){if(r.isForMainFrame()){sr.setRefreshing(false);
-          String o=C.optString("offline").isEmpty()?"You are offline":C.optString("offline");
-          v.loadData("<meta name=viewport content='width=device-width'><body style='font-family:sans-serif;text-align:center;padding:40px'><h2>"+o+"</h2><p>Pull down to try again.</p>","text/html","UTF-8");}}});
-          w.setWebChromeClient(new WebChromeClient(){
-          @Override public boolean onShowFileChooser(WebView v,ValueCallback<Uri[]> cb,FileChooserParams p){if(!b("files"))return false;
-          if(fc!=null)fc.onReceiveValue(null);fc=cb;try{startActivityForResult(p.createIntent(),1);}catch(Exception e){fc=null;return false;}return true;}
-          @Override public void onGeolocationPermissionsShowPrompt(String o,GeolocationPermissions.Callback c){c.invoke(o,b("loc"),false);}
-          @Override public void onPermissionRequest(PermissionRequest r){runOnUiThread(()->{if(b("cam"))r.grant(r.getResources());else r.deny();});}});
-          ArrayList<String> ps=new ArrayList<>();
-          if(b("cam"))ps.add(Manifest.permission.CAMERA);if(b("loc"))ps.add(Manifest.permission.ACCESS_FINE_LOCATION);if(b("notif")&&android.os.Build.VERSION.SDK_INT>=33)ps.add("android.permission.POST_NOTIFICATIONS");
-          if(!ps.isEmpty())ActivityCompat.requestPermissions(this,ps.toArray(new String[0]),1);
-          getOnBackPressedDispatcher().addCallback(this,new OnBackPressedCallback(true){@Override public void handleOnBackPressed(){
-          if(dl.isDrawerOpen(GravityCompat.START))dl.closeDrawers();else if(!"exit".equals(C.optString("back"))&&w.canGoBack())w.goBack();else finish();}});
-          w.loadUrl(base);}
-          void applyPrefs(){w.getSettings().setTextZoom(sp.getInt("zoom",100));sr.setEnabled(b("ptr")&&sp.getBoolean("ptr",true));
-          if(sp.getBoolean("awake",false))getWindow().addFlags(128);else getWindow().clearFlags(128);}
-          @Override protected void onResume(){super.onResume();applyPrefs();}
-          void menu(int id){
-          if(id>=100){go(C.optJSONArray("menu").optJSONObject(id-100).optString("u"));return;}
-          String app=C.optString("name");
-          if(id==1)startActivity(new Intent(this,SettingsActivity.class));
-          else if(id==2){Intent i=new Intent(Intent.ACTION_SEND);i.setType("text/plain");i.putExtra(Intent.EXTRA_TEXT,app+"\n"+(b("live")?"https://play.google.com/store/apps/details?id="+getPackageName():base));startActivity(Intent.createChooser(i,"Share"));}
-          else if(id==3)rate();
-          else if(id==4)mail("Feedback","");
-          else if(id==5){String a=C.optString("about");new AlertDialog.Builder(this).setTitle(app).setMessage((a.isEmpty()?"":a+"\n\n")+"Version "+C.optString("ver")).setPositiveButton("OK",null).show();}
-          else if(id==6){try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(C.optString("privacy"))));}catch(Exception e){}}}
-          void rate(){final RatingBar r=new RatingBar(this);r.setNumStars(5);r.setStepSize(1);r.setRating(5);
-          LinearLayout bx=new LinearLayout(this);bx.setGravity(Gravity.CENTER);bx.setPadding(0,dp(16),0,0);bx.addView(r,new LinearLayout.LayoutParams(-2,-2));
-          new AlertDialog.Builder(this).setTitle("Rate "+C.optString("name")).setView(bx).setPositiveButton("Submit",(d,x)->{int n=(int)r.getRating();
-          if(b("live")&&n>=4){Uri u=Uri.parse("market://details?id="+getPackageName());try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse("https://play.google.com/store/apps/details?id="+getPackageName())));}}
-          else mail("Rating "+n+"/5","Rating: "+n+"/5\n\n");}).setNegativeButton("Later",null).show();}
-          void mail(String sub,String body){String to=C.optString("mail");
-          if(to.isEmpty()){Toast.makeText(this,"Thank you for your feedback!",Toast.LENGTH_LONG).show();return;}
-          Intent i=new Intent(Intent.ACTION_SENDTO,Uri.parse("mailto:"));i.putExtra(Intent.EXTRA_EMAIL,new String[]{to});i.putExtra(Intent.EXTRA_SUBJECT,C.optString("name")+" - "+sub);
-          i.putExtra(Intent.EXTRA_TEXT,body+"App version: "+C.optString("ver")+"\nAndroid: "+android.os.Build.VERSION.RELEASE+"\nDevice: "+android.os.Build.MODEL);
-          try{startActivity(i);}catch(Exception e){Toast.makeText(this,"No email app found",Toast.LENGTH_LONG).show();}}
-          @Override protected void onActivityResult(int q,int c,Intent d){if(q==1&&fc!=null){fc.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c,d));fc=null;}}
+
+          cat > build.gradle <<'EOF'
+          plugins {
+            id "com.android.application" version "8.11.1" apply false
           }
           EOF
-          cat > app/src/main/java/com/w2a/app/SettingsActivity.java <<'EOF'
-          package com.w2a.app;
-          import android.content.SharedPreferences;import android.graphics.Color;import android.graphics.drawable.Drawable;import android.os.Bundle;import android.util.TypedValue;import android.view.View;
-          import android.webkit.*;import android.widget.*;
-          import androidx.appcompat.app.*;import androidx.appcompat.widget.Toolbar;
-          import androidx.core.content.ContextCompat;import androidx.core.graphics.Insets;import androidx.core.view.*;
-          public class SettingsActivity extends AppCompatActivity{
-          SharedPreferences sp;LinearLayout box;
-          int dp(int v){return (int)(v*getResources().getDisplayMetrics().density);}
-          void sw(String label,String key,boolean def,Runnable after){Switch s=new Switch(this);s.setText(label);s.setTextSize(16);s.setPadding(dp(20),dp(14),dp(20),dp(14));
-          s.setChecked(sp.getBoolean(key,def));s.setOnCheckedChangeListener((v,c)->{sp.edit().putBoolean(key,c).apply();if(after!=null)after.run();});box.addView(s);}
-          @Override protected void onCreate(Bundle st){super.onCreate(st);
-          WindowCompat.setDecorFitsSystemWindows(getWindow(),false);
-          sp=getSharedPreferences("w2a",0);int th=sp.getInt("th",0xFF4F46E5);
-          LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
-          TypedValue tv=new TypedValue();getTheme().resolveAttribute(android.R.attr.colorBackground,tv,true);root.setBackgroundColor(tv.data);
-          View top=new View(this);top.setBackgroundColor(th);
-          Toolbar tb=new Toolbar(this);tb.setBackgroundColor(th);tb.setTitle("Settings");tb.setTitleTextColor(Color.WHITE);
-          Drawable bk=ContextCompat.getDrawable(this,getResources().getIdentifier("ic_back","drawable",getPackageName())).mutate();bk.setTint(Color.WHITE);
-          tb.setNavigationIcon(bk);tb.setNavigationOnClickListener(v->finish());
-          ScrollView sv=new ScrollView(this);box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);sv.addView(box);
-          root.addView(top,new LinearLayout.LayoutParams(-1,0));root.addView(tb,new LinearLayout.LayoutParams(-1,dp(56)));root.addView(sv,new LinearLayout.LayoutParams(-1,0,1f));
-          setContentView(root);
-          ViewCompat.setOnApplyWindowInsetsListener(root,(v,in)->{Insets bi=in.getInsets(WindowInsetsCompat.Type.systemBars());
-          top.getLayoutParams().height=bi.top;top.requestLayout();v.setPadding(0,0,0,bi.bottom);return WindowInsetsCompat.CONSUMED;});
-          sw("Dark mode","dark",false,()->AppCompatDelegate.setDefaultNightMode(sp.getBoolean("dark",false)?AppCompatDelegate.MODE_NIGHT_YES:AppCompatDelegate.MODE_NIGHT_NO));
-          TextView l=new TextView(this);l.setText("Text size");l.setTextSize(16);l.setPadding(dp(20),dp(14),dp(20),0);box.addView(l);
-          Spinner sn=new Spinner(this);sn.setAdapter(new ArrayAdapter<String>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"Small","Normal","Large"}));
-          final int[] z={90,100,125};int cur=sp.getInt("zoom",100);sn.setSelection(cur<100?0:cur>100?2:1);
-          sn.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
-          @Override public void onItemSelected(AdapterView<?> p,View v,int pos,long id){sp.edit().putInt("zoom",z[pos]).apply();}
-          @Override public void onNothingSelected(AdapterView<?> p){}});
-          box.addView(sn);
-          sw("Pull to refresh","ptr",true,null);sw("Keep screen on","awake",false,null);sw("Open external links inside the app","extapp",false,null);
-          Button cb=new Button(this);cb.setText("Clear cache and cookies");
-          cb.setOnClickListener(v->{WebView x=new WebView(this);x.clearCache(true);x.destroy();CookieManager.getInstance().removeAllCookies(null);WebStorage.getInstance().deleteAllData();Toast.makeText(this,"Cleared",Toast.LENGTH_SHORT).show();});
-          box.addView(cb);
-          }}
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
           EOF
+
+          cat > "$R/values/themes.xml" <<EOF
+          <resources>
+            <style name="AppTheme" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+              <item name="colorPrimary">$THEME</item>
+              <item name="colorSecondary">$THEME</item>
+              <item name="colorOnPrimary">#FFFFFF</item>
+            </style>
+          </resources>
+          EOF
+
+          cat > app/build.gradle <<EOF
+          plugins {
+            id "com.android.application"
+          }
+
+          android {
+            namespace "com.w2a.app"
+            compileSdk 36
+
+            defaultConfig {
+              applicationId "$PKG"
+              minSdk 24
+              targetSdk 36
+              versionCode $CODE
+              versionName "$VER"
+            }
+
+            lint {
+              checkReleaseBuilds false
+              abortOnError false
+            }
+
+            $SIGN
+
+            buildTypes {
+              release {
+                $REL
+                minifyEnabled false
+              }
+            }
+          }
+
+          dependencies {
+            implementation "androidx.appcompat:appcompat:1.7.1"
+            implementation "com.google.android.material:material:1.12.0"
+            implementation "androidx.swiperefreshlayout:swiperefreshlayout:1.1.0"
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<EOF
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+            <uses-permission android:name="android.permission.INTERNET"/>
+            $PERMS
+
+            <application
+              android:label="$NAME"
+              $ICON
+              android:theme="@style/AppTheme"
+              android:usesCleartextTraffic="false">
+
+              <activity
+                android:name=".MainActivity"
+                android:exported="true"
+                android:screenOrientation="$OR"
+                android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize">
+
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+
+              </activity>
+
+            </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/w2a/app/MainActivity.java <<'EOF'
+          package com.w2a.app;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceError;
+          import android.webkit.GeolocationPermissions;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import android.content.Intent;
+
+          import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+
+          public class MainActivity extends Activity {
+
+              private WebView webView;
+              private SwipeRefreshLayout refresh;
+
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+
+                  String url = "URL_PLACEHOLDER";
+                  String offline = "OFFLINE_PLACEHOLDER";
+
+                  webView = new WebView(this);
+                  refresh = new SwipeRefreshLayout(this);
+                  refresh.addView(webView);
+                  setContentView(refresh);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(JS_PLACEHOLDER);
+                  settings.setDomStorageEnabled(true);
+                  settings.setCacheMode(CACHE_PLACEHOLDER);
+                  settings.setAllowFileAccess(FILES_PLACEHOLDER);
+                  settings.setGeolocationEnabled(LOC_PLACEHOLDER);
+
+                  String ua = "UA_PLACEHOLDER";
+                  if (!ua.isEmpty()) {
+                      settings.setUserAgentString(ua);
+                  }
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          Uri uri = request.getUrl();
+
+                          if (!uri.getScheme().equals("http") &&
+                              !uri.getScheme().equals("https")) {
+                              try {
+                                  startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                              } catch (Exception ignored) {}
+                              return true;
+                          }
+
+                          return false;
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          refresh.setRefreshing(false);
+                      }
+
+                      @Override
+                      public void onReceivedError(
+                              WebView view,
+                              WebResourceRequest request,
+                              WebResourceError error) {
+
+                          if (request.isForMainFrame()) {
+                              refresh.setRefreshing(false);
+                              view.loadData(
+                                  "<html><meta name='viewport' content='width=device-width'>" +
+                                  "<body style='font-family:sans-serif;text-align:center;padding:40px'>" +
+                                  "<h2>" + offline + "</h2>" +
+                                  "<p>Pull down to try again.</p></body></html>",
+                                  "text/html",
+                                  "UTF-8"
+                              );
+                          }
+                      }
+                  });
+
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onGeolocationPermissionsShowPrompt(
+                              String origin,
+                              GeolocationPermissions.Callback callback) {
+                          callback.invoke(origin, LOC_PLACEHOLDER, false);
+                      }
+
+                      @Override
+                      public void onPermissionRequest(PermissionRequest request) {
+                          runOnUiThread(() -> {
+                              if (CAM_PLACEHOLDER) {
+                                  request.grant(request.getResources());
+                              } else {
+                                  request.deny();
+                              }
+                          });
+                      }
+                  });
+
+                  refresh.setEnabled(PTR_PLACEHOLDER);
+                  refresh.setOnRefreshListener(() -> webView.reload());
+
+                  webView.loadUrl(url);
+              }
+          }
+          EOF
+
+          sed -i \
+            -e "s|URL_PLACEHOLDER|$URL|g" \
+            -e "s|OFFLINE_PLACEHOLDER|$OFFLINE|g" \
+            -e "s|JS_PLACEHOLDER|$JS|g" \
+            -e "s|CACHE_PLACEHOLDER|$CM|g" \
+            -e "s|FILES_PLACEHOLDER|$FILES|g" \
+            -e "s|LOC_PLACEHOLDER|$LOC|g" \
+            -e "s|UA_PLACEHOLDER|$UA|g" \
+            -e "s|PTR_PLACEHOLDER|$PTR|g" \
+            -e "s|CAM_PLACEHOLDER|$CAM|g" \
+            app/src/main/java/com/w2a/app/MainActivity.java
+
       - name: Compile
         env:
           CFG: ${{ inputs.config }}
           KSPASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        shell: bash
         run: |
-          if [ "$(echo "$CFG" | base64 -d | jq -r .release)" = true ]; then gradle bundleRelease assembleRelease --no-daemon -q; else gradle assembleDebug --no-daemon -q; fi
-      - name: Publish APK
+          set -e
+
+          RELEASE=$(echo "$CFG" | base64 -d | jq -r '.release')
+
+          if [ "$RELEASE" = "true" ]; then
+            echo "Building signed release APK + AAB..."
+            gradle bundleRelease assembleRelease --no-daemon --stacktrace
+          else
+            echo "Building debug APK..."
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Publish APK and AAB
         env:
           GH_TOKEN: ${{ github.token }}
           ID: ${{ inputs.build_id }}
+          CFG: ${{ inputs.config }}
+        shell: bash
         run: |
-          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk "$ID.apk"; cp app/build/outputs/bundle/release/app-release.aab "$ID.aab"; FILES="$ID.apk $ID.aab"
+          set -e
+
+          RELEASE=$(echo "$CFG" | base64 -d | jq -r '.release')
+
+          rm -f "$ID.apk" "$ID.aab"
+
+          if [ "$RELEASE" = "true" ]; then
+
+            test -f app/build/outputs/apk/release/app-release.apk
+            test -f app/build/outputs/bundle/release/app-release.aab
+
+            cp app/build/outputs/apk/release/app-release.apk "$ID.apk"
+            cp app/build/outputs/bundle/release/app-release.aab "$ID.aab"
+
+            gh release create "$ID" \
+              "$ID.apk" \
+              "$ID.aab" \
+              --title "$ID" \
+              --notes "Web2APK signed Play Store build"
+
           else
-            cp app/build/outputs/apk/debug/app-debug.apk "$ID.apk"; FILES="$ID.apk"
+
+            test -f app/build/outputs/apk/debug/app-debug.apk
+
+            cp app/build/outputs/apk/debug/app-debug.apk "$ID.apk"
+
+            gh release create "$ID" \
+              "$ID.apk" \
+              --title "$ID" \
+              --notes "Web2APK debug build"
+
           fi
-          gh release create "$ID" $FILES --title "$ID" --notes "Built by Web2APK"
-          git config user.name bot && git config user.email bot@users.noreply.github.com
-          git rm -q "icons/$ID.png" 2>/dev/null && git commit -qm cleanup && git push -q || true
+
+      - name: Remove build icon
+        if: always()
+        env:
+          ID: ${{ inputs.build_id }}
+        shell: bash
+        run: |
+          if [ -f "icons/$ID.png" ]; then
+            git rm -f "icons/$ID.png" || true
+            git config user.name "web2apk-bot"
+            git config user.email "web2apk-bot@users.noreply.github.com"
+            git commit -m "cleanup build icon $ID" || true
+            git push || true
+          fi
