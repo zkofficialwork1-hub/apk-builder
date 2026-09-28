@@ -1,0 +1,117 @@
+name: Build APK
+run-name: build ${{ inputs.build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        required: true
+      config:
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Generate Android project
+        env:
+          CFG: ${{ inputs.config }}
+          ID: ${{ inputs.build_id }}
+        run: |
+          set -e
+          j(){ echo "$CFG" | base64 -d | jq -r "$1"; }
+          NAME=$(j .name); PKG=$(j .pkg); VER=$(j .ver); CODE=$(j .code); URL=$(j .url)
+          STATUS=$(j .status); NAV=$(j .nav); UA=$(j .ua); OFFLINE=$(j .offline)
+          JS=$(j .js); PTR=$(j .ptr); FILES=$(j .files); CAM=$(j .cam); LOC=$(j .loc); DEBUG=$(j .debug)
+          case "$(j .orient)" in portrait) OR=portrait;; landscape) OR=landscape;; *) OR=unspecified;; esac
+          case "$(j .cache)" in network) CM=WebSettings.LOAD_NO_CACHE;; cache) CM=WebSettings.LOAD_CACHE_ELSE_NETWORK;; *) CM=WebSettings.LOAD_DEFAULT;; esac
+          [ "$(j .ext)" = app ] && EXTAPP=true || EXTAPP=false
+          [ "$(j .back)" = exit ] && BACKEXIT=true || BACKEXIT=false
+          [ "$(j .full)" = true ] && FULL='getWindow().getDecorView().setSystemUiVisibility(5894);' || FULL=''
+          [ -z "$OFFLINE" ] && OFFLINE="You are offline"
+          UP=""; PERMS=""
+          perm(){ UP="$UP<uses-permission android:name=\"android.permission.$1\"/>"; PERMS="$PERMS\"android.permission.$1\","; }
+          [ "$CAM" = true ] && perm CAMERA || true
+          [ "$LOC" = true ] && perm ACCESS_FINE_LOCATION || true
+          [ "$(j .notif)" = true ] && perm POST_NOTIFICATIONS || true
+          ICON=""
+          if [ -f "icons/$ID.png" ]; then
+            mkdir -p app/src/main/res/mipmap-xxhdpi
+            cp "icons/$ID.png" app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+            ICON='android:icon="@mipmap/ic_launcher"'
+          fi
+          mkdir -p app/src/main/java/com/w2a/app
+          printf "pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}\ndependencyResolutionManagement{repositories{google();mavenCentral()}}\ninclude ':app'\n" > settings.gradle
+          echo "plugins{id 'com.android.application' version '8.5.2' apply false}" > build.gradle
+          printf "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx2g\n" > gradle.properties
+          cat > app/build.gradle <<EOF
+          plugins{id 'com.android.application'}
+          android{namespace 'com.w2a.app';compileSdk 34
+          defaultConfig{applicationId "$PKG";minSdk 24;targetSdk 34;versionCode $CODE;versionName "$VER"}}
+          dependencies{implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'}
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<EOF
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          <uses-permission android:name="android.permission.INTERNET"/>$UP
+          <application android:label="$NAME" $ICON android:theme="@android:style/Theme.DeviceDefault.NoActionBar" android:usesCleartextTraffic="false">
+          <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="$OR" android:configChanges="orientation|screenSize|keyboardHidden">
+          <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+          </activity></application></manifest>
+          EOF
+          cat > app/src/main/java/com/w2a/app/MainActivity.java <<EOF
+          package com.w2a.app;
+          import android.app.Activity;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.Bundle;
+          import android.webkit.*;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          public class MainActivity extends Activity{
+          static final String URL="$URL",OFF="$OFFLINE",UA="$UA";
+          static final String[] P={$PERMS};
+          static final boolean FILES=$FILES,LOC=$LOC,CAM=$CAM,EXTAPP=$EXTAPP,BACKEXIT=$BACKEXIT;
+          final String HOST=Uri.parse(URL).getHost();
+          WebView w;SwipeRefreshLayout s;ValueCallback<Uri[]> fc;
+          @Override protected void onCreate(Bundle b){super.onCreate(b);
+          getWindow().setStatusBarColor(Color.parseColor("$STATUS"));getWindow().setNavigationBarColor(Color.parseColor("$NAV"));
+          w=new WebView(this);s=new SwipeRefreshLayout(this);s.addView(w);setContentView(s);$FULL
+          s.setEnabled($PTR);s.setOnRefreshListener(()->{if(w.getUrl()==null||w.getUrl().startsWith("data:"))w.loadUrl(URL);else w.reload();});
+          WebSettings t=w.getSettings();t.setJavaScriptEnabled($JS);t.setDomStorageEnabled(true);t.setGeolocationEnabled(LOC);t.setCacheMode($CM);
+          if(UA.length()>0)t.setUserAgentString(UA);
+          WebView.setWebContentsDebuggingEnabled($DEBUG);
+          w.setDownloadListener((u,a,c,m,l)->{if(FILES){try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(u)));}catch(Exception e){}}});
+          w.setWebViewClient(new WebViewClient(){
+          @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){Uri u=r.getUrl();String sc=u.getScheme();
+          if(!"http".equals(sc)&&!"https".equals(sc)){try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}
+          if(EXTAPP||u.getHost()==null||u.getHost().equals(HOST)||u.getHost().endsWith("."+HOST))return false;
+          startActivity(new Intent(Intent.ACTION_VIEW,u));return true;}
+          @Override public void onPageFinished(WebView v,String u){s.setRefreshing(false);}
+          @Override public void onReceivedError(WebView v,WebResourceRequest r,WebResourceError e){if(r.isForMainFrame()){s.setRefreshing(false);
+          v.loadData("<meta name=viewport content='width=device-width'><body style='font-family:sans-serif;text-align:center;padding:40px'><h2>"+OFF+"</h2><p>Pull down to try again.</p>","text/html","UTF-8");}}});
+          w.setWebChromeClient(new WebChromeClient(){
+          @Override public boolean onShowFileChooser(WebView v,ValueCallback<Uri[]> cb,FileChooserParams p){if(!FILES)return false;
+          if(fc!=null)fc.onReceiveValue(null);fc=cb;try{startActivityForResult(p.createIntent(),1);}catch(Exception e){fc=null;return false;}return true;}
+          @Override public void onGeolocationPermissionsShowPrompt(String o,GeolocationPermissions.Callback c){c.invoke(o,LOC,false);}
+          @Override public void onPermissionRequest(PermissionRequest r){runOnUiThread(()->{if(CAM)r.grant(r.getResources());else r.deny();});}});
+          if(P.length>0&&android.os.Build.VERSION.SDK_INT>=23)requestPermissions(P,1);
+          w.loadUrl(URL);}
+          @Override protected void onActivityResult(int q,int c,Intent d){if(q==1&&fc!=null){fc.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c,d));fc=null;}}
+          @Override public void onBackPressed(){if(!BACKEXIT&&w.canGoBack())w.goBack();else super.onBackPressed();}
+          }
+          EOF
+      - name: Compile
+        run: gradle assembleDebug --no-daemon -q
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ID: ${{ inputs.build_id }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "$ID.apk"
+          gh release create "$ID" "$ID.apk" --title "$ID" --notes "Built by Web2APK"
+          git config user.name bot && git config user.email bot@users.noreply.github.com
+          git rm -q "icons/$ID.png" 2>/dev/null && git commit -qm cleanup && git push -q || true
